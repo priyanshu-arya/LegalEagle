@@ -3,21 +3,20 @@
 import streamlit as st
 from dotenv import load_dotenv
 import os
+import time
 import fitz  # PyMuPDF
 import pinecone
-import time
 
 # Core LangChain components
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
 from langchain.schema import Document
+from langchain.chains import RetrievalQA
 
-# UPDATED: OpenAI components moved to langchain_openai
-from langchain_openai import OpenAIEmbeddings
-from langchain_openai import ChatOpenAI
+# Updated LangChain imports
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_pinecone import Pinecone as LangChainPinecone
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# UPDATED: Pinecone integration moved to langchain_pinecone
-from langchain_pinecone import Pinecone
 
 # --- UTILITY FUNCTIONS ---
 
@@ -30,7 +29,7 @@ def extract_document_data(pdf_file):
     with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
         for i, page in enumerate(doc):
             text = page.get_text()
-            if text:  # Only add pages with text
+            if text:
                 documents.append(Document(page_content=text, metadata={'page': i + 1}))
     return documents
 
@@ -44,35 +43,37 @@ def get_text_chunks(documents):
     chunked_documents = text_splitter.split_documents(documents)
     return chunked_documents
 
+# --- REVISED LOGIC TO PREVENT RACE CONDITION ---
 def get_or_create_vectorstore(chunked_documents, index_name):
     """
-    Creates or gets a vector store from text chunks.
-    Deletes existing vectors in the index to ensure a fresh start.
+    Initializes the Pinecone index (creating it if necessary) and
+    returns a vector store object for querying.
     """
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small") # Using a specific, cost-effective model
-    
-    # Initialize connection to Pinecone
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
-    if index_name not in pc.list_indexes().names():
-        st.info(f"Creating new Pinecone index: {index_name}")
+    # Check if the index already exists
+    if index_name in pc.list_indexes().names():
+        st.info("Index already exists. Clearing existing data...")
+        index = pc.Index(index_name)
+        index.delete(deleteAll=True)
+    else:
+        st.info(f"Index not found. Creating new index: {index_name}")
         pc.create_index(
-            name=index_name, 
-            dimension=1536, # OpenAI's text-embedding-3-small dimension
+            name=index_name,
+            dimension=1536,
             metric='cosine',
-            spec=pinecone.ServerlessSpec(cloud='aws', region='us-east-1') # Recommended spec
+            spec=pinecone.ServerlessSpec(cloud='aws', region='us-east-1')
         )
+        # Wait for the index to be ready
         while not pc.describe_index(index_name).status['ready']:
             time.sleep(1)
 
-    index = pc.Index(index_name)
-    st.info("Clearing previous document from memory...")
-    index.delete(deleteAll=True)
-    
-    st.info("Embedding document...")
-    vectorstore = Pinecone.from_documents(
-        documents=chunked_documents, 
-        embedding=embeddings, 
+    st.info("Embedding document and adding to index...")
+    # The from_documents method handles embedding and upserting
+    vectorstore = LangChainPinecone.from_documents(
+        documents=chunked_documents,
+        embedding=embeddings,
         index_name=index_name
     )
     return vectorstore
@@ -81,7 +82,7 @@ def create_conversation_chain(vectorstore):
     """Creates a question-answering chain."""
     llm = ChatOpenAI(temperature=0.2, model_name="gpt-4o")
     retriever = vectorstore.as_retriever(
-        search_type="similarity", 
+        search_type="similarity",
         search_kwargs={"k": 3}
     )
     qa_chain = RetrievalQA.from_chain_type(
@@ -98,9 +99,9 @@ def main():
     load_dotenv()
     st.set_page_config(page_title="LegalEagle 🦅", page_icon="⚖️")
     st.header("LegalEagle — AI-Powered Contract Assistant 🦅")
-    
-    PINECONE_INDEX_NAME = "legaleagle-prod"
-    
+
+    PINECONE_INDEX_NAME = "legaleagle" # Use a simple index name
+
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "messages" not in st.session_state:
@@ -116,7 +117,7 @@ def main():
                     text_chunks = get_text_chunks(docs)
                     vectorstore = get_or_create_vectorstore(text_chunks, PINECONE_INDEX_NAME)
                     st.session_state.conversation = create_conversation_chain(vectorstore)
-                    st.session_state.messages = [] 
+                    st.session_state.messages = []
                     st.success("Document processed! You can now ask questions about it.")
 
     st.divider()
@@ -140,7 +141,7 @@ def main():
                     st.markdown(answer)
                     with st.expander("Show Sources"):
                         for doc in source_docs:
-                            st.info(f"**Source (Page {doc.metadata['page']}):**\n\n{doc.page_content}")
+                            st.info(f"**Source (Page {doc.metadata.get('page', 'N/A')}):**\n\n{doc.page_content}")
                 st.session_state.messages.append({"role": "assistant", "content": answer})
         else:
             st.warning("Please upload and process a document first.")
