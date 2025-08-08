@@ -20,6 +20,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- UTILITY FUNCTIONS ---
 
 def extract_document_data(pdf_file):
+    """Extracts text and metadata from a PDF."""
     documents = []
     with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
         for i, page in enumerate(doc):
@@ -29,6 +30,7 @@ def extract_document_data(pdf_file):
     return documents
 
 def get_text_chunks(documents):
+    """Splits documents into chunks."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
@@ -36,20 +38,17 @@ def get_text_chunks(documents):
     )
     return text_splitter.split_documents(documents)
 
-
-# --- FINAL ROBUST LOGIC ---
 def get_or_create_vectorstore(chunked_documents, index_name):
+    """Initializes Pinecone and creates a vector store, handling potential errors."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
     try:
-        # Directly describe the index to check existence and readiness
         pc.describe_index(index_name)
         st.info("Index already exists. Clearing existing data...")
         index = pc.Index(index_name)
         index.delete(deleteAll=True)
     except pinecone.NotFoundException:
-        # If the index does not exist, create it
         st.info(f"Index not found. Creating new index: {index_name}")
         pc.create_index(
             name=index_name,
@@ -57,10 +56,8 @@ def get_or_create_vectorstore(chunked_documents, index_name):
             metric='cosine',
             spec=pinecone.ServerlessSpec(cloud='aws', region='us-east-1')
         )
-        # Wait for the index to be ready
         while not pc.describe_index(index_name).status['ready']:
             time.sleep(1)
-        # Add an extra delay for insurance against data plane lag
         st.info("Waiting for index to be fully available...")
         time.sleep(10)
 
@@ -75,7 +72,7 @@ def get_or_create_vectorstore(chunked_documents, index_name):
             index.upsert(vectors=[(vector_id, embedded_doc[0], doc.metadata)])
             progress_text = f"Embedding chunk {i + 1}/{len(chunked_documents)}"
             progress_bar.progress((i + 1) / len(chunked_documents), text=progress_text)
-            time.sleep(20)  # Delay for OpenAI free-tier rate limits
+            time.sleep(20)
         except openai.RateLimitError:
             st.error("OpenAI rate limit hit. Please wait a minute and try again, or upgrade your OpenAI plan.")
             return None
@@ -88,6 +85,7 @@ def get_or_create_vectorstore(chunked_documents, index_name):
     return vectorstore
 
 def create_conversation_chain(vectorstore):
+    """Creates a question-answering chain."""
     llm = ChatOpenAI(temperature=0.2, model_name="gpt-4o")
     retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
     qa_chain = RetrievalQA.from_chain_type(
@@ -111,7 +109,8 @@ def main():
 
     with st.sidebar:
         st.subheader("Your Document")
-        pdf__doc = st.file_uploader("Upload your PDF and click 'Process'", type="pdf")
+        # Ensure the variable name is consistent
+        pdf_doc = st.file_uploader("Upload your PDF and click 'Process'", type="pdf")
         if st.button("Process"):
             if pdf_doc is not None:
                 with st.spinner("Processing document..."):
