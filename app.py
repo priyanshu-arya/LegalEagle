@@ -5,8 +5,10 @@ from dotenv import load_dotenv
 import os
 import time
 import fitz  # PyMuPDF
-import pinecone
 import openai
+import pinecone
+# CORRECTED: Import specific exceptions from the pinecone.exceptions module
+from pinecone.exceptions import ConflictException, NotFoundException
 
 # Core LangChain components
 from langchain.schema import Document
@@ -46,10 +48,18 @@ def get_or_create_vectorstore(chunked_documents, index_name):
 
     try:
         pc.describe_index(index_name)
-        st.info("Index already exists. Clearing existing data...")
         index = pc.Index(index_name)
-        index.delete(deleteAll=True)
-    except pinecone.NotFoundException:
+        # Add specific error handling for the delete operation
+        try:
+            st.info("Index already exists. Clearing existing data...")
+            index.delete(deleteAll=True)
+        except NotFoundException:
+            # This can happen if the index is new and has no vectors/namespaces yet.
+            # We can safely ignore it because our goal is an empty index.
+            st.info("Index is new and already empty. Skipping clear.")
+            pass
+            
+    except NotFoundException:
         st.info(f"Index not found. Attempting to create new index: {index_name}")
         try:
             pc.create_index(
@@ -62,10 +72,10 @@ def get_or_create_vectorstore(chunked_documents, index_name):
                 time.sleep(1)
             st.info("Index created. Waiting for it to be fully available...")
             time.sleep(10) # Extra delay for insurance
-        except pinecone.ConflictException:
+        except ConflictException:
             # This handles the race condition where the index was created
             # between the describe_index and create_index calls.
-            st.info("Index already exists, but was not found initially. Continuing.")
+            st.info("Index was created by another process. Continuing.")
             pass
 
     index = pc.Index(index_name)
