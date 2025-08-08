@@ -38,8 +38,9 @@ def get_text_chunks(documents):
     )
     return text_splitter.split_documents(documents)
 
+# --- FINAL ROBUST LOGIC ---
 def get_or_create_vectorstore(chunked_documents, index_name):
-    """Initializes Pinecone and creates a vector store, handling potential errors."""
+    """Initializes Pinecone and creates a vector store, handling all race conditions."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
@@ -49,17 +50,23 @@ def get_or_create_vectorstore(chunked_documents, index_name):
         index = pc.Index(index_name)
         index.delete(deleteAll=True)
     except pinecone.NotFoundException:
-        st.info(f"Index not found. Creating new index: {index_name}")
-        pc.create_index(
-            name=index_name,
-            dimension=1536,
-            metric='cosine',
-            spec=pinecone.ServerlessSpec(cloud='aws', region='us-east-1')
-        )
-        while not pc.describe_index(index_name).status['ready']:
-            time.sleep(1)
-        st.info("Waiting for index to be fully available...")
-        time.sleep(10)
+        st.info(f"Index not found. Attempting to create new index: {index_name}")
+        try:
+            pc.create_index(
+                name=index_name,
+                dimension=1536,
+                metric='cosine',
+                spec=pinecone.ServerlessSpec(cloud='aws', region='us-east-1')
+            )
+            while not pc.describe_index(index_name).status['ready']:
+                time.sleep(1)
+            st.info("Index created. Waiting for it to be fully available...")
+            time.sleep(10) # Extra delay for insurance
+        except pinecone.ConflictException:
+            # This handles the race condition where the index was created
+            # between the describe_index and create_index calls.
+            st.info("Index already exists, but was not found initially. Continuing.")
+            pass
 
     index = pc.Index(index_name)
     st.info("Embedding document with rate-limiting... This will be slow.")
@@ -74,7 +81,7 @@ def get_or_create_vectorstore(chunked_documents, index_name):
             progress_bar.progress((i + 1) / len(chunked_documents), text=progress_text)
             time.sleep(20)
         except openai.RateLimitError:
-            st.error("OpenAI rate limit hit. Please wait a minute and try again, or upgrade your OpenAI plan.")
+            st.error("OpenAI rate limit hit. Upgrade your OpenAI plan for faster processing.")
             return None
         except Exception as e:
             st.error(f"An error occurred during embedding: {e}")
@@ -94,7 +101,6 @@ def create_conversation_chain(vectorstore):
     return qa_chain
 
 # --- STREAMLIT UI ---
-
 def main():
     load_dotenv()
     st.set_page_config(page_title="LegalEagle 🦅", page_icon="⚖️")
@@ -109,7 +115,6 @@ def main():
 
     with st.sidebar:
         st.subheader("Your Document")
-        # Ensure the variable name is consistent
         pdf_doc = st.file_uploader("Upload your PDF and click 'Process'", type="pdf")
         if st.button("Process"):
             if pdf_doc is not None:
@@ -121,6 +126,8 @@ def main():
                     st.session_state.conversation = create_conversation_chain(vectorstore)
                     st.session_state.messages = []
                     st.success("Document processed! You can now ask questions.")
+            else:
+                st.warning("Please upload a PDF file first.")
 
     st.divider()
 
